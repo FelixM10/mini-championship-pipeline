@@ -481,7 +481,7 @@ def run() -> pd.DataFrame:
         len(squad_df),
     )
 
-    return player_df
+    return player_df, squad_df
 
 
 if __name__ == "__main__":
