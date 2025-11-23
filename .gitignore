@@ -1,0 +1,13 @@
+# OS cruft
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenv
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
