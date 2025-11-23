@@ -1,21 +1,28 @@
 """
-Build curated semantic tables for the 2024/25 Championship:
+Build curated semantic tables for the 2024/25 Championship.
+
+Pipeline:
+
+1) Uses dim_club (dim_club_2024_25.csv) for canonical club mapping.
 
 Outputs (all in data/curated):
 
 - player_stats_semantic_2024_25.csv
     * FBRef player standard stats
     * club_id + canonical club name in column 'club'
+    * nationality normalised to canonical full country names
 
 - transfers_in_semantic_2024_25.csv
     * Transfermarkt transfers in
     * club_id + canonical club name in column 'club'
-    * from_club_name standardized to canonical if it's a Championship club
+    * nationality normalised to canonical full country names
+    * from_club_name standardised to canonical if it's a Championship club
 
 - transfers_out_semantic_2024_25.csv
     * Transfermarkt transfers out
     * club_id + canonical club name in column 'club'
-    * to_club_name standardized to canonical if it's a Championship club
+    * nationality normalised to canonical full country names
+    * to_club_name standardised to canonical if it's a Championship club
 
 - league_table_enhanced_2024_25.csv
     * TM league table + FBRef squad stats + transfers summary
@@ -33,9 +40,11 @@ import pandas as pd
 from src.config import RAW_DATA_DIR
 from src.utils.logging_utils import get_logger
 from src.utils.dim_club_24_25 import (
-    build_dim_club,
-    attach_club_id_from_source,
+    load_dim_club,
+    attach_club_id,
+    standardize_club_name,
 )
+from src.utils.dim_country import normalize_country
 
 logger = get_logger(__name__)
 
@@ -125,20 +134,24 @@ def parse_transfer_fee_to_eur(value: str) -> float:
 
 def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     """
-    Attach club_id and canonical club name ('club') to FBRef player stats.
+    Attach club_id and canonical club name ('club') to FBRef player stats,
+    and normalise nationality to canonical full country names.
     """
     raw_path = RAW_DATA_DIR / "fbref_championship_player_standard_stats_2024_25.csv"
     logger.info("Loading FBRef player stats from %s", raw_path)
     df = pd.read_csv(raw_path)
 
+    # FBRef column is usually 'nation' with ISO-ish codes (e.g. "GAM", "CUW")
+    # Rename to 'nationality' for consistency
+    if "nation" in df.columns:
+        df.rename(columns={"nation": "nationality"}, inplace=True)
+
+    # Normalise nationality BEFORE attaching club_id / merging
+    if "nationality" in df.columns:
+        df["nationality"] = df["nationality"].astype(str).apply(normalize_country)
+
     # Attach club_id based on FBRef 'squad' labels
-    df = attach_club_id_from_source(
-        df,
-        club_col="squad",
-        source="fbref_squad",
-        dim_club=dim_club,
-        new_col="club_id",
-    )
+    df = attach_club_id(df, col="squad", dim_club=dim_club)
 
     # Add canonical club name and drop raw squad label
     df = df.merge(
@@ -152,7 +165,7 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     if "squad" in df.columns:
         df = df.drop(columns=["squad"])
 
-    # Order: club_id, club near the front (optional)
+    # Order: club_id, club near the front
     front_cols = ["club_id", "club"]
     other_cols = [c for c in df.columns if c not in front_cols]
     df = df[front_cols + other_cols]
@@ -171,7 +184,8 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     - attaches club_id for the Championship club (Club column)
     - adds canonical club name in 'club'
     - parses fee to fee_eur
-    - standardizes from_club_name / to_club_name to canonical names
+    - normalises nationality to canonical full country names
+    - standardises from_club_name / to_club_name to canonical names
       when those clubs are also Championship clubs (via dim_club).
     """
     tin_path = RAW_DATA_DIR / "transfermarkt_transfers_in_2024_25.csv"
@@ -184,21 +198,8 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     tout = pd.read_csv(tout_path)
 
     # Attach club_id based on Transfermarkt 'Club' labels
-    tin = attach_club_id_from_source(
-        tin,
-        club_col="Club",
-        source="tm_transfers",
-        dim_club=dim_club,
-        new_col="club_id",
-    )
-
-    tout = attach_club_id_from_source(
-        tout,
-        club_col="Club",
-        source="tm_transfers",
-        dim_club=dim_club,
-        new_col="club_id",
-    )
+    tin = attach_club_id(tin, col="Club", dim_club=dim_club)
+    tout = attach_club_id(tout, col="Club", dim_club=dim_club)
 
     # Add canonical club name for the Championship club itself
     tin = tin.merge(
@@ -224,11 +225,13 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         tout = tout.drop(columns=["Club"])
 
     # Rename remaining columns for a cleaner schema
+    # NOTE: raw headers are: [Club, In, Age, Nat., Position, Market value, Left, Fee]
     tin = tin.rename(
         columns={
             "In": "player_name",
             "Age": "age",
-            "Nationality": "nationality",
+            "Nat.": "nationality",
+            "Nationality": "nationality",  # in case of prior change
             "Position": "position",
             "Market value": "market_value",
             "Left": "from_club_name",
@@ -240,6 +243,7 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         columns={
             "Out": "player_name",
             "Age": "age",
+            "Nat.": "nationality",
             "Nationality": "nationality",
             "Position": "position",
             "Market value": "market_value",
@@ -248,18 +252,15 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         }
     )
 
+    # Normalise nationality in transfers
+    if "nationality" in tin.columns:
+        tin["nationality"] = tin["nationality"].astype(str).apply(normalize_country)
+    if "nationality" in tout.columns:
+        tout["nationality"] = tout["nationality"].astype(str).apply(normalize_country)
+
     # --------------------------------------------------------
     # STANDARDISE from_club_name / to_club_name WHEN POSSIBLE
     # --------------------------------------------------------
-    # We use dim_club.tm_transfers_raw_name (raw Transfermarkt labels)
-    # to identify which external clubs are also Championship clubs.
-    club_map = {}
-    if "tm_transfers_raw_name" in dim_club.columns:
-        for _, row in dim_club.iterrows():
-            raw = row["tm_transfers_raw_name"]
-            canonical = row["canonical_club_name"]
-            if isinstance(raw, str) and raw:
-                club_map[raw] = canonical
 
     def standardize_external_club(raw_name: str) -> str:
         """
@@ -268,7 +269,10 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         """
         if not isinstance(raw_name, str):
             return raw_name
-        return club_map.get(raw_name, raw_name)
+        try:
+            return standardize_club_name(raw_name)
+        except KeyError:
+            return raw_name
 
     # Transfers IN → players coming *into* Championship clubs
     if "from_club_name" in tin.columns:
@@ -318,13 +322,7 @@ def build_league_table_enhanced(
     squad = pd.read_csv(squad_path)
 
     # Attach club_id based on league "club" labels
-    league = attach_club_id_from_source(
-        league,
-        club_col="club",
-        source="league",
-        dim_club=dim_club,
-        new_col="club_id",
-    )
+    league = attach_club_id(league, col="club", dim_club=dim_club)
 
     # Parse numeric columns
     for col in ["#", "played", "w", "d", "l", "gd", "pts"]:
@@ -337,13 +335,7 @@ def build_league_table_enhanced(
         league["goals_against"] = ga
 
     # Attach club_id to FBRef squad stats
-    squad = attach_club_id_from_source(
-        squad,
-        club_col="squad",
-        source="fbref_squad",
-        dim_club=dim_club,
-        new_col="club_id",
-    )
+    squad = attach_club_id(squad, col="squad", dim_club=dim_club)
 
     # Build squad summary with 'squad_' prefix
     squad_cols = [c for c in squad.columns if c not in ("club_id", "squad")]
@@ -424,8 +416,8 @@ def build_league_table_enhanced(
 def main() -> None:
     ensure_curated_dir()
 
-    # Build dim_club in memory
-    dim_club = build_dim_club()
+    # 0) Load dim_club (from CSV, or build+write it if missing)
+    dim_club = load_dim_club()
     logger.info("Loaded dim_club with %d rows", len(dim_club))
 
     # 1) Player stats semantic

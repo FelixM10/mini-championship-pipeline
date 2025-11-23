@@ -8,7 +8,6 @@ import requests
 from bs4 import BeautifulSoup
 
 from src.config import RAW_DATA_DIR
-from src.utils.gcp import upload_file_to_gcs
 from src.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -16,8 +15,8 @@ logger = get_logger(__name__)
 # Custom UA to identify this as a one-off educational script (not GPTBot etc.)
 HEADERS = {
     "User-Agent": (
-        "mini-championship-pipeline/1.0 "
-        "(contact: your_email@example.com; non-commercial, educational use)"
+        "championship-pipeline/1.0 "
+        "(contact: mutiufelix@gmail.com; non-commercial, educational use)"
     )
 }
 
@@ -402,7 +401,7 @@ def run() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
       - transfers out
     for the 2024/25 Championship from Transfermarkt.
 
-    Save raw CSVs locally and upload to GCS.
+    Save raw CSVs locally.
     """
     league_url = (
         "https://www.transfermarkt.co.uk/championship/"
@@ -427,14 +426,6 @@ def run() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     league_df.to_csv(league_path, index=False)
     transfers_in_df.to_csv(transfers_in_path, index=False)
     transfers_out_df.to_csv(transfers_out_path, index=False)
-
-    upload_file_to_gcs(league_path, "raw/transfermarkt/league_table_2024_25.csv")
-    upload_file_to_gcs(
-        transfers_in_path, "raw/transfermarkt/transfers_in_2024_25.csv"
-    )
-    upload_file_to_gcs(
-        transfers_out_path, "raw/transfermarkt/transfers_out_2024_25.csv"
-    )
 
     logger.info("Transfermarkt extract complete.")
     return league_df, transfers_in_df, transfers_out_df

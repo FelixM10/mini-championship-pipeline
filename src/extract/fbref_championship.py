@@ -7,7 +7,6 @@ import pandas as pd
 from bs4 import BeautifulSoup, Comment
 
 from src.config import RAW_DATA_DIR
-from src.utils.gcp import upload_file_to_gcs
 from src.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -450,7 +449,6 @@ def run() -> pd.DataFrame:
       - write TWO CSVs:
           * fbref_championship_player_standard_stats_2024_25.csv
           * fbref_championship_squad_standard_stats_2024_25.csv
-      - upload both to GCS
     """
     html = load_fbref_html_from_file()
 
@@ -471,9 +469,6 @@ def run() -> pd.DataFrame:
 
     player_df.to_csv(player_out, index=False)
     squad_df.to_csv(squad_out, index=False)
-
-    upload_file_to_gcs(player_out, "raw/fbref/player_standard_stats_2024_25.csv")
-    upload_file_to_gcs(squad_out, "raw/fbref/squad_standard_stats_2024_25.csv")
 
     logger.info(
         "FBRef standard stats extract complete. Players=%d, Squads=%d",

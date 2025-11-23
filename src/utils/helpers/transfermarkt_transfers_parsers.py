@@ -1,3 +1,5 @@
+#Paste this in a Jupyter notebook cell to explore the structure of the league table HTML.
+
 from bs4 import BeautifulSoup
 import requests
 
