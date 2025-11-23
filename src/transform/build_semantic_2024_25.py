@@ -201,7 +201,7 @@ def build_player_advanced_semantic(
     - Starts from the curated player_standard_semantic table
       (FBRef standard stats, with club_id, canonical club, nationality cleaned).
     - Loads advanced player stats from data/transform:
-        data/transform/player_advanced_stats/
+        data/transform/
           fbref_championship_player_advanced_stats_2024_25.csv
       which contains per-player advanced features:
         misplaced_passes, shots, sca, sca90, gca, gca90,

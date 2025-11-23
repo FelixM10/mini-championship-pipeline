@@ -11,3 +11,8 @@ __pycache__/
 
 # Jupyter
 .ipynb_checkpoints/
+
+#Service account and .env
+*.json
+credentials/
+.env

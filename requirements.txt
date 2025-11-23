@@ -10,3 +10,4 @@ matplotlib
 pycountry
 adjustText
 db-dtypes
+python-dotenv
