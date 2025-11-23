@@ -1,5 +1,6 @@
 # src/extract/fbref_championship.py
 
+from functools import reduce
 from pathlib import Path
 from typing import List, Dict
 
@@ -11,10 +12,19 @@ from src.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-FBREF_HTML_FILENAME = "fbref_championship_standard_2024_25.html"
+FBREF_HTML_FILENAME = "html/fbref_championship_standard_2024_25.html"
 FBREF_HTML_PATH = RAW_DATA_DIR / FBREF_HTML_FILENAME
 
 FBREF_BASE_URL = "https://fbref.com"
+
+# Extra player-only tables we care about
+ADVANCED_PLAYER_TABLES = ("passing", "shooting", "gca", "possession")
+
+# Where to write the merged advanced stats
+PLAYER_ADVANCED_DIR = RAW_DATA_DIR.parent / "transform"
+PLAYER_ADVANCED_OUTPUT = (
+    PLAYER_ADVANCED_DIR / "fbref_championship_player_advanced_stats_2024_25.csv"
+)
 
 
 # ---------- HTML loading ----------
@@ -39,6 +49,27 @@ def load_fbref_html_from_file() -> str:
 
     logger.info(f"Loading FBRef HTML from {FBREF_HTML_PATH}")
     return FBREF_HTML_PATH.read_text(encoding="utf-8")
+
+
+def load_fbref_html_for_table(table_type: str) -> str:
+    """
+    Load the locally saved FBRef HTML snapshot for a given advanced player table.
+
+    We expect filenames of the form:
+        data/raw/html/fbref_championship_<table_type>_2024_25.html
+
+    where <table_type> is one of: passing, shooting, sca, possession.
+    """
+    html_path = RAW_DATA_DIR / "html" / f"fbref_championship_{table_type}_2024_25.html"
+
+    if not html_path.exists():
+        raise FileNotFoundError(
+            f"FBRef HTML file for table '{table_type}' not found at {html_path}. "
+            f"Download the 'Player {table_type.title()} Stats' page and save it here."
+        )
+
+    logger.info("Loading FBRef %s HTML from %s", table_type, html_path)
+    return html_path.read_text(encoding="utf-8")
 
 
 # ---------- Table extraction helpers ----------
@@ -99,6 +130,45 @@ def extract_squad_table(html: str):
     return table
 
 
+def extract_advanced_player_table(html: str, table_type: str):
+    """
+    Extract the *player* table for an 'advanced' stats page
+    (passing, shooting, sca, possession).
+
+    Structure:
+      - Container: div#div_stats_<table_type>
+      - FBRef often hides the real table inside an HTML comment, so we:
+          * first search for a commented-out <table>,
+          * then fall back to a direct <table> if needed.
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    container_id = f"all_stats_{table_type}"
+    container = soup.find("div", id=container_id)
+    if container is None:
+        raise RuntimeError(f"Could not find div#{container_id} in FBRef HTML")
+
+    # 1) Try commented-out table (usual FBRef pattern)
+    table_comment = None
+    for c in container.find_all(string=lambda t: isinstance(t, Comment)):
+        if "<table" in c:
+            table_comment = c
+            break
+
+    if table_comment is not None:
+        inner_soup = BeautifulSoup(table_comment, "lxml")
+        table = inner_soup.find("table")
+        if table is not None:
+            return table
+
+    # 2) Fallback: direct table inside the container
+    table = container.find("table")
+    if table is None:
+        raise RuntimeError(f"div#{container_id} has no <table> for table_type='{table_type}'")
+
+    return table
+
+
 # ---------- Core parsing: PLAYER TABLE ----------
 
 
@@ -149,7 +219,11 @@ def parse_player_standard_stats(table) -> pd.DataFrame:
         raise RuntimeError("No player rows parsed from FBRef player standard stats table")
 
     df = pd.DataFrame(records)
-    logger.info("Parsed raw FBRef player table with shape=%s and columns=%s", df.shape, list(df.columns))
+    logger.info(
+        "Parsed raw FBRef player table with shape=%s and columns=%s",
+        df.shape,
+        list(df.columns),
+    )
     return df
 
 
@@ -190,7 +264,11 @@ def parse_squad_standard_stats(table) -> pd.DataFrame:
         raise RuntimeError("No squad rows parsed from FBRef squad standard stats table")
 
     df = pd.DataFrame(records)
-    logger.info("Parsed raw FBRef squad table with shape=%s and columns=%s", df.shape, list(df.columns))
+    logger.info(
+        "Parsed raw FBRef squad table with shape=%s and columns=%s",
+        df.shape,
+        list(df.columns),
+    )
     return df
 
 
@@ -437,6 +515,182 @@ def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ---------- Advanced player stats helpers ----------
+
+
+def _to_numeric(series: pd.Series) -> pd.Series:
+    """Convert a column to numeric, stripping commas; errors -> NaN."""
+    return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce")
+
+
+def extract_passing_features(df: pd.DataFrame, table_type: str = "passing") -> pd.DataFrame:
+    """
+    From the passing table, we need:
+      misplaced_passes = passes - passes_completed
+
+    Columns (data-stat):
+      passes_completed
+      passes
+      plus:
+      player, team
+    """
+    df_num = df.copy()
+    df_num["passes_completed"] = _to_numeric(df_num["passes_completed"])
+    df_num["passes"] = _to_numeric(df_num["passes"])
+
+    df_num["misplaced_passes"] = df_num["passes"] - df_num["passes_completed"]
+
+    out = df_num[["player", "team", "misplaced_passes"]].rename(columns={"team": "squad"})
+    return out
+
+
+def extract_shooting_features(df: pd.DataFrame, table_type: str = "shooting") -> pd.DataFrame:
+    """
+    From the shooting table, we only need total shots.
+
+    Column (data-stat):
+      shots
+      plus:
+      player, team
+    """
+    df_num = df.copy()
+    df_num["shots"] = _to_numeric(df_num["shots"])
+
+    out = df_num[["player", "team", "shots"]].rename(columns={"team": "squad"})
+    return out
+
+
+def extract_gca_features(df: pd.DataFrame, table_type: str = "gca") -> pd.DataFrame:
+    """
+    From the GCA table, we need:
+      SCA, SCA90, GCA, GCA90
+
+    Columns (data-stat):
+      sca
+      sca_per90
+      gca
+      gca_per90
+      plus:
+      player, team
+    """
+    df_num = df.copy()
+    for col in ["sca", "sca_per90", "gca", "gca_per90"]:
+        if col not in df_num.columns:
+            raise RuntimeError(
+                f"Expected column '{col}' not found in FBRef '{table_type}' table. "
+                f"Available columns: {list(df_num.columns)}"
+            )
+        df_num[col] = _to_numeric(df_num[col])
+
+    out = df_num[["player", "team", "sca", "sca_per90", "gca", "gca_per90"]].rename(
+        columns={
+            "team": "squad",
+            "sca_per90": "sca90",
+            "gca_per90": "gca90",
+        }
+    )
+    return out
+
+
+def extract_possession_features(df: pd.DataFrame, table_type: str = "possession") -> pd.DataFrame:
+    """
+    From the possession table, we need:
+      touches, miscontrols, dispossessed, failed_take_ons
+
+      failed_take_ons = take_ons - take_ons_won
+
+    Columns (data-stat):
+      touches
+      miscontrols
+      dispossessed
+      take_ons         (attempted)
+      take_ons_won     (successful)
+      plus:
+      player, team
+    """
+    df_num = df.copy()
+    for col in ["touches", "miscontrols", "dispossessed", "take_ons", "take_ons_won"]:
+        if col not in df_num.columns:
+            raise RuntimeError(
+                f"Expected column '{col}' not found in FBRef '{table_type}' table. "
+                f"Available columns: {list(df_num.columns)}"
+            )
+        df_num[col] = _to_numeric(df_num[col])
+
+    df_num["failed_take_ons"] = df_num["take_ons"] - df_num["take_ons_won"]
+
+    out = df_num[
+        ["player", "team", "touches", "miscontrols", "dispossessed", "failed_take_ons"]
+    ].rename(columns={"team": "squad"})
+    return out
+
+
+ADVANCED_EXTRACTORS = {
+    "passing": extract_passing_features,
+    "shooting": extract_shooting_features,
+    "gca": extract_gca_features,
+    "possession": extract_possession_features,
+}
+
+
+def build_player_advanced_stats() -> pd.DataFrame:
+    """
+    Build the merged player advanced stats table from:
+      - passing   -> misplaced_passes
+      - shooting  -> shots
+      - sca       -> sca, sca90, gca, gca90
+      - possession-> touches, miscontrols, dispossessed, failed_take_ons
+
+    Steps:
+      - For each table in ADVANCED_PLAYER_TABLES:
+          * load HTML
+          * extract player table from div_stats_<table>
+          * parse using parse_player_standard_stats
+          * compute the specific features we care about
+      - Outer-join all feature DataFrames on (player, squad)
+      - Write to data/transform/player_advanced_stats/...
+    """
+    feature_dfs: List[pd.DataFrame] = []
+
+    for table_type in ADVANCED_PLAYER_TABLES:
+        logger.info("Processing FBRef advanced player table: %s", table_type)
+
+        html = load_fbref_html_for_table(table_type)
+        table = extract_advanced_player_table(html, table_type)
+        raw_df = parse_player_standard_stats(table)
+
+        extractor = ADVANCED_EXTRACTORS[table_type]
+        feat_df = extractor(raw_df, table_type=table_type)
+
+        logger.info(
+            "Extracted features for '%s'; shape=%s, columns=%s",
+            table_type,
+            feat_df.shape,
+            list(feat_df.columns),
+        )
+        feature_dfs.append(feat_df)
+
+    if not feature_dfs:
+        raise RuntimeError("No advanced feature DataFrames were built for player stats.")
+
+    advanced_df = reduce(
+        lambda left, right: pd.merge(left, right, on=["player", "squad"], how="outer"),
+        feature_dfs,
+    )
+
+    PLAYER_ADVANCED_DIR.mkdir(parents=True, exist_ok=True)
+    advanced_df.to_csv(PLAYER_ADVANCED_OUTPUT, index=False)
+
+    logger.info(
+        "FBRef advanced player stats written to %s with shape=%s and columns=%s",
+        PLAYER_ADVANCED_OUTPUT,
+        advanced_df.shape,
+        list(advanced_df.columns),
+    )
+
+    return advanced_df
+
+
 # ---------- Main entrypoint ----------
 
 
@@ -449,6 +703,9 @@ def run() -> pd.DataFrame:
       - write TWO CSVs:
           * fbref_championship_player_standard_stats_2024_25.csv
           * fbref_championship_squad_standard_stats_2024_25.csv
+      - also build advanced player stats from passing/shooting/sca/possession:
+          * data/transform/player_advanced_stats/
+              fbref_championship_player_advanced_stats_2024_25.csv
     """
     html = load_fbref_html_from_file()
 
@@ -475,6 +732,16 @@ def run() -> pd.DataFrame:
         len(player_df),
         len(squad_df),
     )
+
+    # Build and write advanced player stats table
+    try:
+        adv_df = build_player_advanced_stats()
+        logger.info(
+            "FBRef advanced player stats extract complete. Players=%d",
+            len(adv_df),
+        )
+    except Exception:
+        logger.exception("Failed to build advanced player stats table.")
 
     return player_df, squad_df
 

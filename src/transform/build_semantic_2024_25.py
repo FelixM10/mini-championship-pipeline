@@ -12,6 +12,12 @@ Outputs (all in data/curated):
     * club_id + canonical club name in column 'club'
     * nationality normalised to canonical full country names
 
+- player_advanced_stats_2024_25.csv
+    * FBRef player standard stats + FBRef advanced player stats
+      (passing/shooting/sca/possession-derived metrics)
+    * club_id + canonical club name in column 'club'
+    * nationality normalised to canonical full country names (from standard stats)
+
 - transfers_in_semantic_2024_25.csv
     * Transfermarkt transfers in
     * club_id + canonical club name in column 'club'
@@ -53,6 +59,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------
 DATA_DIR = RAW_DATA_DIR.parent           # e.g. data/
 CURATED_DIR = DATA_DIR / "curated"       # e.g. data/curated
+TRANSFORM_DIR = DATA_DIR / "transform"   # e.g. data/transform
 
 
 def ensure_curated_dir() -> Path:
@@ -129,7 +136,7 @@ def parse_transfer_fee_to_eur(value: str) -> float:
 
 
 # =========================================================
-# Player stats semantic
+# Player stats semantic (standard FBRef player table)
 # =========================================================
 
 def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
@@ -142,9 +149,13 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     df = pd.read_csv(raw_path)
 
     # FBRef column is usually 'nation' with ISO-ish codes (e.g. "GAM", "CUW")
-    # Rename to 'nationality' for consistency
+    # Rename for consistency across tables
     if "nation" in df.columns:
         df.rename(columns={"nation": "nationality"}, inplace=True)
+    if "pos" in df.columns:
+        df.rename(columns={"pos": "position"}, inplace=True)
+    if "player" in df.columns:
+        df.rename(columns={"player": "player_name"}, inplace=True)
 
     # Normalise nationality BEFORE attaching club_id / merging
     if "nationality" in df.columns:
@@ -165,12 +176,89 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     if "squad" in df.columns:
         df = df.drop(columns=["squad"])
 
+    if "rk" in df.columns:
+        df = df.drop(columns=["rk"])
+
     # Order: club_id, club near the front
     front_cols = ["club_id", "club"]
     other_cols = [c for c in df.columns if c not in front_cols]
     df = df[front_cols + other_cols]
 
     return df
+
+
+# =========================================================
+# Player advanced stats semantic
+# =========================================================
+
+def build_player_advanced_semantic(
+    dim_club: pd.DataFrame,
+    player_standard_sem: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build a merged player advanced stats table:
+
+    - Starts from the curated player_standard_semantic table
+      (FBRef standard stats, with club_id, canonical club, nationality cleaned).
+    - Loads advanced player stats from data/transform:
+        data/transform/player_advanced_stats/
+          fbref_championship_player_advanced_stats_2024_25.csv
+      which contains per-player advanced features:
+        misplaced_passes, shots, sca, sca90, gca, gca90,
+        touches, miscontrols, dispossessed, failed_take_ons
+    - Performs the SAME club canonicalisation on the advanced table:
+        * attach_club_id via 'squad'
+        * attach canonical club name 'club'
+    - Merges advanced stats onto the standard semantic table on
+        ['club_id', 'player_name']
+    - Returns the merged DataFrame ready for upload as player_advanced_stats.
+    """
+    adv_path = TRANSFORM_DIR / "fbref_championship_player_advanced_stats_2024_25.csv"
+    logger.info("Loading FBRef advanced player stats from %s", adv_path)
+    adv = pd.read_csv(adv_path)
+
+    # Advanced table currently has 'player' and 'squad'
+    if "player" in adv.columns:
+        adv.rename(columns={"player": "player_name"}, inplace=True)
+
+    # Attach club_id based on FBRef 'squad' labels
+    adv = attach_club_id(adv, col="squad", dim_club=dim_club)
+
+    # Add canonical club name as 'club' (same as standard)
+    adv = adv.merge(
+        dim_club[["club_id", "canonical_club_name"]],
+        on="club_id",
+        how="left",
+    ).rename(columns={"canonical_club_name": "club"})
+
+    # We don't need 'squad' anymore after club_id/canonical handling
+    if "squad" in adv.columns:
+        adv = adv.drop(columns=["squad"])
+
+    # Ensure consistent column order for advanced table too:
+    front_adv = ["club_id", "club", "player_name"]
+    other_adv = [c for c in adv.columns if c not in front_adv]
+    adv = adv[front_adv + other_adv]
+
+    # For merging: we already have 'club' in the standard semantic table and
+    # in adv; we only need one canonical 'club' column in the final output.
+    # We'll drop 'club' from adv and merge on ['club_id', 'player_name'].
+    adv_for_merge = adv.drop(columns=["club"])
+
+    merged = player_standard_sem.merge(
+        adv_for_merge,
+        on=["club_id", "player_name"],
+        how="left",
+        suffixes=("", "_adv"),
+    )
+
+    logger.info(
+        "Built player advanced semantic stats with shape=%s and columns=%s",
+        merged.shape,
+        list(merged.columns),
+    )
+
+    return merged
 
 
 # =========================================================
@@ -420,11 +508,17 @@ def main() -> None:
     dim_club = load_dim_club()
     logger.info("Loaded dim_club with %d rows", len(dim_club))
 
-    # 1) Player stats semantic
+    # 1) Player stats semantic (standard)
     player_sem = build_player_stats_semantic(dim_club)
     player_path = CURATED_DIR / "player_stats_semantic_2024_25.csv"
     player_sem.to_csv(player_path, index=False)
     logger.info("Wrote player stats semantic to %s", player_path)
+
+    # 1b) Player advanced stats semantic (standard + advanced merged)
+    player_adv_sem = build_player_advanced_semantic(dim_club, player_sem)
+    player_adv_path = CURATED_DIR / "player_advanced_stats_2024_25.csv"
+    player_adv_sem.to_csv(player_adv_path, index=False)
+    logger.info("Wrote player advanced stats semantic to %s", player_adv_path)
 
     # 2) Transfers semantic
     transfers_in_sem, transfers_out_sem = build_transfers_semantic(dim_club)
