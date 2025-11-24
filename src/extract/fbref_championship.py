@@ -17,10 +17,10 @@ FBREF_HTML_PATH = RAW_DATA_DIR / FBREF_HTML_FILENAME
 
 FBREF_BASE_URL = "https://fbref.com"
 
-# Extra player-only tables we care about
+# Advanced tables
 ADVANCED_PLAYER_TABLES = ("passing", "shooting", "gca", "possession")
 
-# Where to write the merged advanced stats
+# Advanced tables writeout location
 PLAYER_ADVANCED_DIR = RAW_DATA_DIR.parent / "transform"
 PLAYER_ADVANCED_OUTPUT = (
     PLAYER_ADVANCED_DIR / "fbref_championship_player_advanced_stats_2024_25.csv"
@@ -354,7 +354,7 @@ def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
             errors="coerce",
         )
 
-    # Column order similar to your sample
+    # Column order
     desired_order = [
         "rk",
         "player",
@@ -420,7 +420,7 @@ def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {
         "team": "squad",
         "players_used": "players",
-        "players": "players",  # safety
+        "players": "players",
         "avg_age": "age",
         "possession": "poss",
         # playing time

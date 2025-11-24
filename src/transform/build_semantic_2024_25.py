@@ -148,7 +148,7 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     logger.info("Loading FBRef player stats from %s", raw_path)
     df = pd.read_csv(raw_path)
 
-    # FBRef column is usually 'nation' with ISO-ish codes (e.g. "GAM", "CUW")
+    # FBRef column is usually 'nation' with ISO-like codes (e.g. "GAM", "CUW")
     # Rename for consistency across tables
     if "nation" in df.columns:
         df.rename(columns={"nation": "nationality"}, inplace=True)
@@ -157,7 +157,7 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     if "player" in df.columns:
         df.rename(columns={"player": "player_name"}, inplace=True)
 
-    # Normalise nationality BEFORE attaching club_id / merging
+    # Normalise nationality before attaching club_id / merging
     if "nationality" in df.columns:
         df["nationality"] = df["nationality"].astype(str).apply(normalize_country)
 
@@ -313,13 +313,12 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         tout = tout.drop(columns=["Club"])
 
     # Rename remaining columns for a cleaner schema
-    # NOTE: raw headers are: [Club, In, Age, Nat., Position, Market value, Left, Fee]
     tin = tin.rename(
         columns={
             "In": "player_name",
             "Age": "age",
             "Nat.": "nationality",
-            "Nationality": "nationality",  # in case of prior change
+            "Nationality": "nationality",
             "Position": "position",
             "Market value": "market_value",
             "Left": "from_club_name",
@@ -362,11 +361,11 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
         except KeyError:
             return raw_name
 
-    # Transfers IN → players coming *into* Championship clubs
+    # Transfers IN
     if "from_club_name" in tin.columns:
         tin["from_club_name"] = tin["from_club_name"].apply(standardize_external_club)
 
-    # Transfers OUT → players leaving Championship clubs
+    # Transfers OUT
     if "to_club_name" in tout.columns:
         tout["to_club_name"] = tout["to_club_name"].apply(standardize_external_club)
 

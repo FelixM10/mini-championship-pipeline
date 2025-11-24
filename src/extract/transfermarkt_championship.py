@@ -12,7 +12,7 @@ from src.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-# Custom UA to identify this as a one-off educational script (not GPTBot etc.)
+# Custom User-Agent to aviod identifying this as a bot
 HEADERS = {
     "User-Agent": (
         "championship-pipeline/1.0 "
@@ -21,7 +21,7 @@ HEADERS = {
 }
 
 REQUEST_TIMEOUT = 20
-REQUEST_DELAY = 2  # polite delay between requests (robots.txt spirit)
+REQUEST_DELAY = 2  # delay between requests (to respect robots.txt)
 
 
 # ---------- Generic helpers ----------
@@ -255,7 +255,7 @@ def parse_transfer_row(tr, club_name: str, in_or_out: str) -> Optional[Dict[str,
             other_club = club_a.get_text(" ", strip=True) if club_a else td.get_text(" ", strip=True)
 
         elif "rechts" in classes and "mw-transfer-cell" not in classes and "no-border" not in " ".join(classes):
-            # fee cell: class 'rechts', but not the market value cell and not the crest cells
+            # fee cell: class 'rechts'
             fee = td.get_text(" ", strip=True)
 
     if in_or_out == "in":

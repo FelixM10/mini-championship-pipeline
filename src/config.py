@@ -7,7 +7,6 @@ load_dotenv()
 
 # ------------ Project Root ------------
 
-# config.py is in ROOT/src/config.py → parent of parent is ROOT
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ------------ Google Cloud Configuration ------------

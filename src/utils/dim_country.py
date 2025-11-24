@@ -102,15 +102,15 @@ RAW_TO_CANONICAL = {
     "bosnia-herzegovina": "Bosnia and Herzegovina",
     "bosnia and herzegovina": "Bosnia and Herzegovina",
 
-    # Fix typo: use lowercase key
+    # Ecuador
     "ecu": "Ecuador",
 
-    # South Korea variants
+    # South Korea
     "kor": "South Korea",
     "korea, south": "South Korea",
     "korea, republic of": "South Korea",
 
-    # Tanzania ISO form
+    # Tanzania
     "tanzania, united republic of": "Tanzania",
 
     # Some common 3-letter codes
@@ -180,7 +180,7 @@ RAW_TO_CANONICAL = {
     "ukr": "Ukraine",
     "zim": "Zimbabwe",
 
-    # English name variants
+    # Saint Kitts and Nevis
     "saint kitts and nevis": "Saint Kitts and Nevis",
     "st. kitts & nevis": "Saint Kitts and Nevis",
 }

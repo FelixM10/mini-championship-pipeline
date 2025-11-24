@@ -73,7 +73,6 @@ def ensure_dataset_exists(dataset_id: str, location: str = "europe-west2") -> bi
     try:
         dataset = bq_client.create_dataset(dataset)
     except Conflict:
-        # Same idea as bucket: if someone created it in between
         logger.info(
             "Dataset '%s' appeared between get and create; re-fetching.", full_id
         )
