@@ -16,3 +16,9 @@ __pycache__/
 *.json
 credentials/
 .env
+
+# Reports
+reports/
+
+# CSV files
+raw/*.csv
