@@ -1,5 +1,3 @@
-# src/extract/transfermarkt_championship.py
-
 import time
 from typing import Tuple, List, Dict, Optional
 
@@ -7,12 +5,13 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from src.config import RAW_DATA_DIR
+from src.config import RAW_DATA_DIR, GCS_BUCKET
+from src.utils.gcp import upload_df_to_gcs
 from src.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
-# Custom User-Agent to aviod identifying this as a bot
+# Custom User-Agent to avoid identifying this as a bot
 HEADERS = {
     "User-Agent": (
         "championship-pipeline/1.0 "
@@ -22,6 +21,9 @@ HEADERS = {
 
 REQUEST_TIMEOUT = 20
 REQUEST_DELAY = 2  # delay between requests (to respect robots.txt)
+
+# GCS prefix for Transfermarkt raw extracts
+GCS_RAW_PREFIX = "transfermarkt/championship_2024_25/raw"
 
 
 # ---------- Generic helpers ----------
@@ -95,23 +97,7 @@ def parse_bs_table_generic(table) -> pd.DataFrame:
 
 def parse_league_table(html: str) -> pd.DataFrame:
     """
-    Extract the Championship league table from the Transfermarkt 'tabelle' page,
-    using the exact structure observed:
-
-    Row <td> order:
-      0: rank #
-      1: crest (ignored)
-      2: club name
-      3: matches played
-      4: W
-      5: D
-      6: L
-      7: Goals (e.g. '95:30')
-      8: +/-  (goal difference)
-      9: Pts  (points)
-
-    Returns a dataframe with columns:
-      ['#', 'club', 'played', 'w', 'd', 'l', 'goals', '+/-', 'pts']
+    Extract the Championship league table from the Transfermarkt 'tabelle' page.
     """
     soup = BeautifulSoup(html, "lxml")
 
@@ -142,7 +128,11 @@ def parse_league_table(html: str) -> pd.DataFrame:
 
         # club name is in td[2], inside an <a>
         club_a = tds[2].find("a")
-        club_name = club_a.get_text(" ", strip=True) if club_a else tds[2].get_text(" ", strip=True)
+        club_name = (
+            club_a.get_text(" ", strip=True)
+            if club_a
+            else tds[2].get_text(" ", strip=True)
+        )
 
         played = tds[3].get_text(" ", strip=True)
         w = tds[4].get_text(" ", strip=True)
@@ -206,8 +196,7 @@ def nat_from_td(td) -> str:
 
 def parse_transfer_row(tr, club_name: str, in_or_out: str) -> Optional[Dict[str, str]]:
     """
-    Parse a single <tr> for either an 'In' or 'Out' table, using the
-    actual CSS classes seen in the HTML.
+    Parse a single <tr> for either an 'In' or 'Out' table.
     """
     tds = tr.find_all("td")
     if not tds:
@@ -216,7 +205,9 @@ def parse_transfer_row(tr, club_name: str, in_or_out: str) -> Optional[Dict[str,
     # Player is the first <td>, take first <a> text if present
     player_td = tds[0]
     a = player_td.find("a")
-    player_name = a.get_text(" ", strip=True) if a else player_td.get_text(" ", strip=True)
+    player_name = (
+        a.get_text(" ", strip=True) if a else player_td.get_text(" ", strip=True)
+    )
     if not player_name:
         return None
     if "average age" in player_name.lower():
@@ -252,9 +243,17 @@ def parse_transfer_row(tr, club_name: str, in_or_out: str) -> Optional[Dict[str,
         elif "verein-flagge-transfer-cell" in classes:
             # club name (Left/Joined)
             club_a = td.find("a")
-            other_club = club_a.get_text(" ", strip=True) if club_a else td.get_text(" ", strip=True)
+            other_club = (
+                club_a.get_text(" ", strip=True)
+                if club_a
+                else td.get_text(" ", strip=True)
+            )
 
-        elif "rechts" in classes and "mw-transfer-cell" not in classes and "no-border" not in " ".join(classes):
+        elif (
+            "rechts" in classes
+            and "mw-transfer-cell" not in classes
+            and "no-border" not in " ".join(classes)
+        ):
             # fee cell: class 'rechts'
             fee = td.get_text(" ", strip=True)
 
@@ -285,11 +284,6 @@ def parse_transfer_row(tr, club_name: str, in_or_out: str) -> Optional[Dict[str,
 def parse_transfers(html: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Extract Championship transfers from the Transfermarkt 'transfers' page.
-
-    For each <div class="responsive-table">:
-      - Determine club name from nearest preceding <h2>.
-      - Look at the first header cell ('In' or 'Out').
-      - Parse each <tr> using CSS classes as in the provided HTML snippet.
 
     Returns:
       transfers_in_df, transfers_out_df
@@ -401,7 +395,7 @@ def run() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
       - transfers out
     for the 2024/25 Championship from Transfermarkt.
 
-    Save raw CSVs locally.
+    Upload raw CSVs directly to GCS (no local CSVs required).
     """
     league_url = (
         "https://www.transfermarkt.co.uk/championship/"
@@ -418,16 +412,36 @@ def run() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     league_df = parse_league_table(league_html)
     transfers_in_df, transfers_out_df = parse_transfers(transfers_html)
 
-    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    league_path = RAW_DATA_DIR / "transfermarkt_league_table_2024_25.csv"
-    transfers_in_path = RAW_DATA_DIR / "transfermarkt_transfers_in_2024_25.csv"
-    transfers_out_path = RAW_DATA_DIR / "transfermarkt_transfers_out_2024_25.csv"
+    # Optional: keep local debug copies by uncommenting:
+    # RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # league_path = RAW_DATA_DIR / "transfermarkt_league_table_2024_25.csv"
+    # transfers_in_path = RAW_DATA_DIR / "transfermarkt_transfers_in_2024_25.csv"
+    # transfers_out_path = RAW_DATA_DIR / "transfermarkt_transfers_out_2024_25.csv"
+    # league_df.to_csv(league_path, index=False)
+    # transfers_in_df.to_csv(transfers_in_path, index=False)
+    # transfers_out_df.to_csv(transfers_out_path, index=False)
 
-    league_df.to_csv(league_path, index=False)
-    transfers_in_df.to_csv(transfers_in_path, index=False)
-    transfers_out_df.to_csv(transfers_out_path, index=False)
+    # Cloud-first: upload DataFrames directly to GCS
+    league_blob = f"{GCS_RAW_PREFIX}/transfermarkt_league_table_2024_25.csv"
+    transfers_in_blob = f"{GCS_RAW_PREFIX}/transfermarkt_transfers_in_2024_25.csv"
+    transfers_out_blob = f"{GCS_RAW_PREFIX}/transfermarkt_transfers_out_2024_25.csv"
 
-    logger.info("Transfermarkt extract complete.")
+    upload_df_to_gcs(league_df, league_blob)
+    upload_df_to_gcs(transfers_in_df, transfers_in_blob)
+    upload_df_to_gcs(transfers_out_df, transfers_out_blob)
+
+    logger.info(
+        "Transfermarkt extract complete. "
+        "Uploaded to: "
+        "gs://%s/%s, gs://%s/%s, gs://%s/%s",
+        GCS_BUCKET,
+        league_blob,
+        GCS_BUCKET,
+        transfers_in_blob,
+        GCS_BUCKET,
+        transfers_out_blob,
+    )
+
     return league_df, transfers_in_df, transfers_out_df
 
 

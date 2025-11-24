@@ -1,49 +1,40 @@
 """
 Build curated semantic tables for the 2024/25 Championship.
 
-Pipeline:
+Inputs (in GCS):
 
-1) Uses dim_club (dim_club_2024_25.csv) for canonical club mapping.
+- gs://<GCS_BUCKET>/fbref/championship_2024_25/raw/
+    * fbref_championship_player_standard_stats_2024_25.csv
+    * fbref_championship_squad_standard_stats_2024_25.csv
 
-Outputs (all in data/curated):
+- gs://<GCS_BUCKET>/fbref/championship_2024_25/transform/
+    * fbref_championship_player_advanced_stats_2024_25.csv
+
+- gs://<GCS_BUCKET>/transfermarkt/championship_2024_25/raw/
+    * transfermarkt_league_table_2024_25.csv
+    * transfermarkt_transfers_in_2024_25.csv
+    * transfermarkt_transfers_out_2024_25.csv
+
+Outputs (locally + in GCS under 'curated/'):
 
 - player_stats_semantic_2024_25.csv
-    * FBRef player standard stats
-    * club_id + canonical club name in column 'club'
-    * nationality normalised to canonical full country names
-
 - player_advanced_stats_2024_25.csv
-    * FBRef player standard stats + FBRef advanced player stats
-      (passing/shooting/sca/possession-derived metrics)
-    * club_id + canonical club name in column 'club'
-    * nationality normalised to canonical full country names (from standard stats)
-
 - transfers_in_semantic_2024_25.csv
-    * Transfermarkt transfers in
-    * club_id + canonical club name in column 'club'
-    * nationality normalised to canonical full country names
-    * from_club_name standardised to canonical if it's a Championship club
-
 - transfers_out_semantic_2024_25.csv
-    * Transfermarkt transfers out
-    * club_id + canonical club name in column 'club'
-    * nationality normalised to canonical full country names
-    * to_club_name standardised to canonical if it's a Championship club
-
 - league_table_enhanced_2024_25.csv
-    * TM league table + FBRef squad stats + transfers summary
-    * club_id + canonical club name in column 'club'
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import io
 import re
 from typing import Tuple
 
 import pandas as pd
+from google.cloud import storage
 
-from src.config import RAW_DATA_DIR
+from src.config import RAW_DATA_DIR, CURATED_DATA_DIR, GCS_BUCKET, GCP_PROJECT_ID
 from src.utils.logging_utils import get_logger
 from src.utils.dim_club_24_25 import (
     load_dim_club,
@@ -51,20 +42,49 @@ from src.utils.dim_club_24_25 import (
     standardize_club_name,
 )
 from src.utils.dim_country import normalize_country
+from src.utils.gcp import upload_df_to_gcs  # cloud-first upload
 
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------
-# Paths
+# Local paths for curated outputs (optional, for debugging)
 # ---------------------------------------------------------
+
 DATA_DIR = RAW_DATA_DIR.parent           # e.g. data/
-CURATED_DIR = DATA_DIR / "curated"       # e.g. data/curated
-TRANSFORM_DIR = DATA_DIR / "transform"   # e.g. data/transform
+CURATED_DIR = CURATED_DATA_DIR           # configured in config.py
+TRANSFORM_DIR = DATA_DIR / "transform"   # kept for backwards compat if needed
 
 
 def ensure_curated_dir() -> Path:
     CURATED_DIR.mkdir(parents=True, exist_ok=True)
     return CURATED_DIR
+
+
+# ---------------------------------------------------------
+# GCS config + helpers
+# ---------------------------------------------------------
+
+FBREF_RAW_PREFIX_GCS = "fbref/championship_2024_25/raw"
+FBREF_TRANSFORM_PREFIX_GCS = "fbref/championship_2024_25/transform"
+TM_RAW_PREFIX_GCS = "transfermarkt/championship_2024_25/raw"
+CURATED_PREFIX_GCS = "curated"  # where semantic outputs are written in the bucket
+
+_storage_client = storage.Client(project=GCP_PROJECT_ID)
+
+
+def read_csv_from_gcs(blob_name: str) -> pd.DataFrame:
+    """
+    Read a CSV from GCS into a DataFrame.
+
+    blob_name: path within the bucket, e.g.
+      'fbref/championship_2024_25/raw/fbref_championship_player_standard_stats_2024_25.csv'
+    """
+    bucket = _storage_client.bucket(GCS_BUCKET)
+    blob = bucket.blob(blob_name)
+
+    logger.info("Reading CSV from gs://%s/%s", GCS_BUCKET, blob_name)
+    csv_text = blob.download_as_text(encoding="utf-8")
+    return pd.read_csv(io.StringIO(csv_text))
 
 
 # =========================================================
@@ -118,7 +138,7 @@ def parse_transfer_fee_to_eur(value: str) -> float:
 
     # If there's a "Loan fee: €X", extract the €X part
     if "loan fee" in low and "€" in s:
-        s = s[s.index("€") :].strip()
+        s = s[s.index("€"):].strip()
 
     m = re.search(r"€\s*([\d\.]+)\s*([mk])?", s, flags=re.IGNORECASE)
     if not m:
@@ -143,10 +163,16 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     """
     Attach club_id and canonical club name ('club') to FBRef player stats,
     and normalise nationality to canonical full country names.
+
+    Source (GCS):
+      gs://<GCS_BUCKET>/fbref/championship_2024_25/raw/
+        fbref_championship_player_standard_stats_2024_25.csv
     """
-    raw_path = RAW_DATA_DIR / "fbref_championship_player_standard_stats_2024_25.csv"
-    logger.info("Loading FBRef player stats from %s", raw_path)
-    df = pd.read_csv(raw_path)
+    blob_name = (
+        f"{FBREF_RAW_PREFIX_GCS}/"
+        "fbref_championship_player_standard_stats_2024_25.csv"
+    )
+    df = read_csv_from_gcs(blob_name)
 
     # FBRef column is usually 'nation' with ISO-like codes (e.g. "GAM", "CUW")
     # Rename for consistency across tables
@@ -184,6 +210,11 @@ def build_player_stats_semantic(dim_club: pd.DataFrame) -> pd.DataFrame:
     other_cols = [c for c in df.columns if c not in front_cols]
     df = df[front_cols + other_cols]
 
+    logger.info(
+        "Built player_stats_semantic with shape=%s and columns=%s",
+        df.shape,
+        list(df.columns),
+    )
     return df
 
 
@@ -196,26 +227,17 @@ def build_player_advanced_semantic(
     player_standard_sem: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Build a merged player advanced stats table:
+    Build a merged player advanced stats table.
 
-    - Starts from the curated player_standard_semantic table
-      (FBRef standard stats, with club_id, canonical club, nationality cleaned).
-    - Loads advanced player stats from data/transform:
-        data/transform/
-          fbref_championship_player_advanced_stats_2024_25.csv
-      which contains per-player advanced features:
-        misplaced_passes, shots, sca, sca90, gca, gca90,
-        touches, miscontrols, dispossessed, failed_take_ons
-    - Performs the SAME club canonicalisation on the advanced table:
-        * attach_club_id via 'squad'
-        * attach canonical club name 'club'
-    - Merges advanced stats onto the standard semantic table on
-        ['club_id', 'player_name']
-    - Returns the merged DataFrame ready for upload as player_advanced_stats.
+    Advanced stats source (GCS):
+      gs://<GCS_BUCKET>/fbref/championship_2024_25/transform/
+        fbref_championship_player_advanced_stats_2024_25.csv
     """
-    adv_path = TRANSFORM_DIR / "fbref_championship_player_advanced_stats_2024_25.csv"
-    logger.info("Loading FBRef advanced player stats from %s", adv_path)
-    adv = pd.read_csv(adv_path)
+    adv_blob = (
+        f"{FBREF_TRANSFORM_PREFIX_GCS}/"
+        "fbref_championship_player_advanced_stats_2024_25.csv"
+    )
+    adv = read_csv_from_gcs(adv_blob)
 
     # Advanced table currently has 'player' and 'squad'
     if "player" in adv.columns:
@@ -240,9 +262,7 @@ def build_player_advanced_semantic(
     other_adv = [c for c in adv.columns if c not in front_adv]
     adv = adv[front_adv + other_adv]
 
-    # For merging: we already have 'club' in the standard semantic table and
-    # in adv; we only need one canonical 'club' column in the final output.
-    # We'll drop 'club' from adv and merge on ['club_id', 'player_name'].
+    # For merging: drop 'club' from advanced table and merge on ['club_id', 'player_name']
     adv_for_merge = adv.drop(columns=["club"])
 
     merged = player_standard_sem.merge(
@@ -253,7 +273,7 @@ def build_player_advanced_semantic(
     )
 
     logger.info(
-        "Built player advanced semantic stats with shape=%s and columns=%s",
+        "Built player_advanced_semantic with shape=%s and columns=%s",
         merged.shape,
         list(merged.columns),
     )
@@ -267,23 +287,17 @@ def build_player_advanced_semantic(
 
 def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Build semantic transfers_in and transfers_out tables:
+    Build semantic transfers_in and transfers_out tables from GCS:
 
-    - attaches club_id for the Championship club (Club column)
-    - adds canonical club name in 'club'
-    - parses fee to fee_eur
-    - normalises nationality to canonical full country names
-    - standardises from_club_name / to_club_name to canonical names
-      when those clubs are also Championship clubs (via dim_club).
+      gs://<GCS_BUCKET>/transfermarkt/championship_2024_25/raw/
+        transfermarkt_transfers_in_2024_25.csv
+        transfermarkt_transfers_out_2024_25.csv
     """
-    tin_path = RAW_DATA_DIR / "transfermarkt_transfers_in_2024_25.csv"
-    tout_path = RAW_DATA_DIR / "transfermarkt_transfers_out_2024_25.csv"
+    tin_blob = f"{TM_RAW_PREFIX_GCS}/transfermarkt_transfers_in_2024_25.csv"
+    tout_blob = f"{TM_RAW_PREFIX_GCS}/transfermarkt_transfers_out_2024_25.csv"
 
-    logger.info("Loading transfers_in from %s", tin_path)
-    tin = pd.read_csv(tin_path)
-
-    logger.info("Loading transfers_out from %s", tout_path)
-    tout = pd.read_csv(tout_path)
+    tin = read_csv_from_gcs(tin_blob)
+    tout = read_csv_from_gcs(tout_blob)
 
     # Attach club_id based on Transfermarkt 'Club' labels
     tin = attach_club_id(tin, col="Club", dim_club=dim_club)
@@ -378,6 +392,17 @@ def build_transfers_semantic(dim_club: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     tin = reorder(tin)
     tout = reorder(tout)
 
+    logger.info(
+        "Built transfers_in_semantic with shape=%s, columns=%s",
+        tin.shape,
+        list(tin.columns),
+    )
+    logger.info(
+        "Built transfers_out_semantic with shape=%s, columns=%s",
+        tout.shape,
+        list(tout.columns),
+    )
+
     return tin, tout
 
 
@@ -391,22 +416,22 @@ def build_league_table_enhanced(
     transfers_out_sem: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Build an enhanced league table:
+    Build an enhanced league table from GCS sources:
 
-    - base: Transfermarkt league table
-    - attach club_id + canonical club (column 'club')
-    - parse goals_for/goals_against
-    - aggregate transfers_in/out (count + fee_eur)
-    - attach FBRef squad summary (prefixed 'squad_')
+      - base: Transfermarkt league table
+      - attach club_id + canonical club (column 'club')
+      - parse goals_for/goals_against
+      - aggregate transfers_in/out (count + fee_eur)
+      - attach FBRef squad summary (prefixed 'squad_')
     """
-    league_path = RAW_DATA_DIR / "transfermarkt_league_table_2024_25.csv"
-    squad_path = RAW_DATA_DIR / "fbref_championship_squad_standard_stats_2024_25.csv"
+    league_blob = f"{TM_RAW_PREFIX_GCS}/transfermarkt_league_table_2024_25.csv"
+    squad_blob = (
+        f"{FBREF_RAW_PREFIX_GCS}/"
+        "fbref_championship_squad_standard_stats_2024_25.csv"
+    )
 
-    logger.info("Loading league table from %s", league_path)
-    league = pd.read_csv(league_path)
-
-    logger.info("Loading FBRef squad stats from %s", squad_path)
-    squad = pd.read_csv(squad_path)
+    league = read_csv_from_gcs(league_blob)
+    squad = read_csv_from_gcs(squad_blob)
 
     # Attach club_id based on league "club" labels
     league = attach_club_id(league, col="club", dim_club=dim_club)
@@ -493,6 +518,12 @@ def build_league_table_enhanced(
     other = [c for c in enhanced.columns if c not in front]
     enhanced = enhanced[front + other]
 
+    logger.info(
+        "Built league_table_enhanced with shape=%s and columns=%s",
+        enhanced.shape,
+        list(enhanced.columns),
+    )
+
     return enhanced
 
 
@@ -510,23 +541,44 @@ def main() -> None:
     # 1) Player stats semantic (standard)
     player_sem = build_player_stats_semantic(dim_club)
     player_path = CURATED_DIR / "player_stats_semantic_2024_25.csv"
-    player_sem.to_csv(player_path, index=False)
-    logger.info("Wrote player stats semantic to %s", player_path)
+    # Optional local write for debugging:
+    #player_sem.to_csv(player_path, index=False)
+    # Cloud-first upload:
+    upload_df_to_gcs(player_sem, f"{CURATED_PREFIX_GCS}/{player_path.name}")
+    logger.info(
+        "Player stats semantic written locally to %s and uploaded to gs://%s/%s",
+        player_path,
+        GCS_BUCKET,
+        f"{CURATED_PREFIX_GCS}/{player_path.name}",
+    )
 
     # 1b) Player advanced stats semantic (standard + advanced merged)
     player_adv_sem = build_player_advanced_semantic(dim_club, player_sem)
     player_adv_path = CURATED_DIR / "player_advanced_stats_2024_25.csv"
-    player_adv_sem.to_csv(player_adv_path, index=False)
-    logger.info("Wrote player advanced stats semantic to %s", player_adv_path)
+    #player_adv_sem.to_csv(player_adv_path, index=False)
+    upload_df_to_gcs(
+        player_adv_sem, f"{CURATED_PREFIX_GCS}/{player_adv_path.name}"
+    )
+    logger.info(
+        "Player advanced stats semantic written locally to %s and uploaded to gs://%s/%s",
+        player_adv_path,
+        GCS_BUCKET,
+        f"{CURATED_PREFIX_GCS}/{player_adv_path.name}",
+    )
 
     # 2) Transfers semantic
     transfers_in_sem, transfers_out_sem = build_transfers_semantic(dim_club)
     tin_path = CURATED_DIR / "transfers_in_semantic_2024_25.csv"
     tout_path = CURATED_DIR / "transfers_out_semantic_2024_25.csv"
-    transfers_in_sem.to_csv(tin_path, index=False)
-    transfers_out_sem.to_csv(tout_path, index=False)
-    logger.info("Wrote transfers_in semantic to %s", tin_path)
-    logger.info("Wrote transfers_out semantic to %s", tout_path)
+    #transfers_in_sem.to_csv(tin_path, index=False)
+    #transfers_out_sem.to_csv(tout_path, index=False)
+    upload_df_to_gcs(transfers_in_sem, f"{CURATED_PREFIX_GCS}/{tin_path.name}")
+    upload_df_to_gcs(transfers_out_sem, f"{CURATED_PREFIX_GCS}/{tout_path.name}")
+    logger.info(
+        "Transfers semantic written locally to %s, %s and uploaded to GCS",
+        tin_path,
+        tout_path,
+    )
 
     # 3) League table enhanced
     league_enhanced = build_league_table_enhanced(
@@ -535,8 +587,14 @@ def main() -> None:
         transfers_out_sem=transfers_out_sem,
     )
     league_path = CURATED_DIR / "league_table_enhanced_2024_25.csv"
-    league_enhanced.to_csv(league_path, index=False)
-    logger.info("Wrote enhanced league table to %s", league_path)
+    #league_enhanced.to_csv(league_path, index=False)
+    upload_df_to_gcs(league_enhanced, f"{CURATED_PREFIX_GCS}/{league_path.name}")
+    logger.info(
+        "League table enhanced written locally to %s and uploaded to gs://%s/%s",
+        league_path,
+        GCS_BUCKET,
+        f"{CURATED_PREFIX_GCS}/{league_path.name}",
+    )
 
     logger.info("Curated semantic build complete.")
 

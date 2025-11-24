@@ -1,5 +1,3 @@
-# src/extract/fbref_championship.py
-
 from functools import reduce
 from pathlib import Path
 from typing import List, Dict
@@ -7,7 +5,8 @@ from typing import List, Dict
 import pandas as pd
 from bs4 import BeautifulSoup, Comment
 
-from src.config import RAW_DATA_DIR
+from src.config import RAW_DATA_DIR, GCS_BUCKET
+from src.utils.gcp import upload_df_to_gcs
 from src.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -20,15 +19,12 @@ FBREF_BASE_URL = "https://fbref.com"
 # Advanced tables
 ADVANCED_PLAYER_TABLES = ("passing", "shooting", "gca", "possession")
 
-# Advanced tables writeout location
-PLAYER_ADVANCED_DIR = RAW_DATA_DIR.parent / "transform"
-PLAYER_ADVANCED_OUTPUT = (
-    PLAYER_ADVANCED_DIR / "fbref_championship_player_advanced_stats_2024_25.csv"
-)
+# GCS layout for this extractor
+GCS_RAW_PREFIX = "fbref/championship_2024_25/raw"
+GCS_TRANSFORM_PREFIX = "fbref/championship_2024_25/transform"
 
 
 # ---------- HTML loading ----------
-
 
 def load_fbref_html_from_file() -> str:
     """
@@ -57,8 +53,6 @@ def load_fbref_html_for_table(table_type: str) -> str:
 
     We expect filenames of the form:
         data/raw/html/fbref_championship_<table_type>_2024_25.html
-
-    where <table_type> is one of: passing, shooting, sca, possession.
     """
     html_path = RAW_DATA_DIR / "html" / f"fbref_championship_{table_type}_2024_25.html"
 
@@ -73,7 +67,6 @@ def load_fbref_html_for_table(table_type: str) -> str:
 
 
 # ---------- Table extraction helpers ----------
-
 
 def extract_player_table(html: str):
     """
@@ -107,14 +100,11 @@ def extract_squad_table(html: str):
     """
     Squad standard stats table is a direct <table> inside
     div#div_stats_squads_standard_for (not commented).
-
-    We grab that table explicitly.
     """
     soup = BeautifulSoup(html, "lxml")
 
     container = soup.find("div", id="div_stats_squads_standard_for")
     if container is None:
-        # Fallback: try table by id if structure changes slightly
         table = soup.find("table", id=lambda v: v and "stats_squads_standard_for" in v)
         if table is None:
             raise RuntimeError(
@@ -133,13 +123,7 @@ def extract_squad_table(html: str):
 def extract_advanced_player_table(html: str, table_type: str):
     """
     Extract the *player* table for an 'advanced' stats page
-    (passing, shooting, sca, possession).
-
-    Structure:
-      - Container: div#div_stats_<table_type>
-      - FBRef often hides the real table inside an HTML comment, so we:
-          * first search for a commented-out <table>,
-          * then fall back to a direct <table> if needed.
+    (passing, shooting, gca, possession).
     """
     soup = BeautifulSoup(html, "lxml")
 
@@ -148,7 +132,7 @@ def extract_advanced_player_table(html: str, table_type: str):
     if container is None:
         raise RuntimeError(f"Could not find div#{container_id} in FBRef HTML")
 
-    # 1) Try commented-out table (usual FBRef pattern)
+    # 1) Try commented-out table
     table_comment = None
     for c in container.find_all(string=lambda t: isinstance(t, Comment)):
         if "<table" in c:
@@ -161,7 +145,7 @@ def extract_advanced_player_table(html: str, table_type: str):
         if table is not None:
             return table
 
-    # 2) Fallback: direct table inside the container
+    # 2) Fallback: direct table
     table = container.find("table")
     if table is None:
         raise RuntimeError(f"div#{container_id} has no <table> for table_type='{table_type}'")
@@ -171,13 +155,9 @@ def extract_advanced_player_table(html: str, table_type: str):
 
 # ---------- Core parsing: PLAYER TABLE ----------
 
-
 def parse_player_standard_stats(table) -> pd.DataFrame:
     """
-    Parse the FBRef *player* standard stats <table> into a raw DataFrame
-    using data-stat attributes as column keys.
-
-    For 'matches' cells we store the full URL instead of the text 'Matches'.
+    Parse the FBRef *player* standard stats <table> into a raw DataFrame.
     """
     tbody = table.find("tbody")
     if tbody is None:
@@ -209,7 +189,6 @@ def parse_player_standard_stats(table) -> pd.DataFrame:
         player = row_data.get("player", "")
         ranker = row_data.get("ranker", "")
 
-        # Skip rows without a player name or numeric rank (e.g. totals/header rows)
         if not player or not ranker.isdigit():
             continue
 
@@ -229,11 +208,9 @@ def parse_player_standard_stats(table) -> pd.DataFrame:
 
 # ---------- Core parsing: SQUAD TABLE ----------
 
-
 def parse_squad_standard_stats(table) -> pd.DataFrame:
     """
-    Parse the FBRef *squad* standard stats <table> into a raw DataFrame,
-    using each cell's data-stat attribute as the column key.
+    Parse the FBRef *squad* standard stats <table> into a raw DataFrame.
     """
     tbody = table.find("tbody")
     if tbody is None:
@@ -274,17 +251,11 @@ def parse_squad_standard_stats(table) -> pd.DataFrame:
 
 # ---------- Cleaning & renaming: PLAYER DF ----------
 
-
 def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Clean and rename player-level FBRef stats:
-      - rename data-stat columns to a tidy schema
-      - normalise nation
-      - convert numeric columns to numbers
-      - keep matches as URL
+    Clean and rename player-level FBRef stats.
     """
     rename_map = {
-        # core identity
         "ranker": "rk",
         "player": "player",
         "nationality": "nation",
@@ -292,12 +263,10 @@ def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
         "team": "squad",
         "age": "age",
         "birth_year": "born",
-        # playing time
         "games": "mp",
         "games_starts": "starts",
         "minutes": "min",
         "minutes_90s": "90s",
-        # raw performance
         "goals": "gls",
         "assists": "ast",
         "goals_assists": "g+a",
@@ -306,16 +275,13 @@ def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
         "pens_att": "pkatt",
         "cards_yellow": "crdy",
         "cards_red": "crdr",
-        # expected
         "xg": "xg",
         "npxg": "npxg",
         "xg_assist": "xag",
         "npxg_xg_assist": "npxg+xag",
-        # progression
         "progressive_carries": "prgc",
         "progressive_passes": "prgp",
         "progressive_passes_received": "prgr",
-        # per 90 – add p90_ prefix
         "goals_per90": "p90_gls",
         "assists_per90": "p90_ast",
         "goals_assists_per90": "p90_g+a",
@@ -326,24 +292,21 @@ def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
         "xg_xg_assist_per90": "p90_xg+xag",
         "npxg_per90": "p90_npxg",
         "npxg_xg_assist_per90": "p90_npxg+xag",
-        # matches link
         "matches": "matches",
     }
 
     df = df.rename(columns=rename_map)
 
-    # Normalise nationality -> 3-letter country code in upper case
     if "nation" in df.columns:
         df["nation"] = (
             df["nation"]
             .astype(str)
             .str.strip()
             .str.split()
-            .str[-1]  # 'us USA' -> 'USA'
+            .str[-1]
             .str.upper()
         )
 
-    # Convert numeric columns (remove ',' and parse)
     non_numeric_cols = {"player", "nation", "pos", "squad", "matches"}
 
     for col in df.columns:
@@ -354,7 +317,6 @@ def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
             errors="coerce",
         )
 
-    # Column order
     desired_order = [
         "rk",
         "player",
@@ -404,18 +366,9 @@ def tidy_player_df(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- Cleaning & renaming: SQUAD DF ----------
 
-
 def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Clean and rename squad-level FBRef stats to match the Squad Standard
-    Stats table on the site.
-
-    The THEAD snippet you shared shows:
-      data-stat="team"         -> Squad
-      data-stat="players_used" -> # Pl
-      data-stat="avg_age"      -> Age
-      data-stat="possession"   -> Poss
-      ... plus the usual games, goals, xg, per90, etc.
+    Clean and rename squad-level FBRef stats.
     """
     rename_map = {
         "team": "squad",
@@ -423,12 +376,10 @@ def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
         "players": "players",
         "avg_age": "age",
         "possession": "poss",
-        # playing time
         "games": "mp",
         "games_starts": "starts",
         "minutes": "min",
         "minutes_90s": "90s",
-        # raw performance
         "goals": "gls",
         "assists": "ast",
         "goals_assists": "g+a",
@@ -437,16 +388,13 @@ def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
         "pens_att": "pkatt",
         "cards_yellow": "crdy",
         "cards_red": "crdr",
-        # expected
         "xg": "xg",
         "npxg": "npxg",
         "xg_assist": "xag",
         "npxg_xg_assist": "npxg+xag",
-        # progression
         "progressive_carries": "prgc",
         "progressive_passes": "prgp",
         "progressive_passes_received": "prgr",
-        # per 90
         "goals_per90": "p90_gls",
         "assists_per90": "p90_ast",
         "goals_assists_per90": "p90_g+a",
@@ -461,7 +409,6 @@ def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=rename_map)
 
-    # Convert numeric columns (remove ',' and parse)
     non_numeric_cols = {"squad"}
 
     for col in df.columns:
@@ -517,23 +464,12 @@ def tidy_squad_df(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- Advanced player stats helpers ----------
 
-
 def _to_numeric(series: pd.Series) -> pd.Series:
     """Convert a column to numeric, stripping commas; errors -> NaN."""
     return pd.to_numeric(series.astype(str).str.replace(",", "", regex=False), errors="coerce")
 
 
 def extract_passing_features(df: pd.DataFrame, table_type: str = "passing") -> pd.DataFrame:
-    """
-    From the passing table, we need:
-      misplaced_passes = passes - passes_completed
-
-    Columns (data-stat):
-      passes_completed
-      passes
-      plus:
-      player, team
-    """
     df_num = df.copy()
     df_num["passes_completed"] = _to_numeric(df_num["passes_completed"])
     df_num["passes"] = _to_numeric(df_num["passes"])
@@ -545,14 +481,6 @@ def extract_passing_features(df: pd.DataFrame, table_type: str = "passing") -> p
 
 
 def extract_shooting_features(df: pd.DataFrame, table_type: str = "shooting") -> pd.DataFrame:
-    """
-    From the shooting table, we only need total shots.
-
-    Column (data-stat):
-      shots
-      plus:
-      player, team
-    """
     df_num = df.copy()
     df_num["shots"] = _to_numeric(df_num["shots"])
 
@@ -561,18 +489,6 @@ def extract_shooting_features(df: pd.DataFrame, table_type: str = "shooting") ->
 
 
 def extract_gca_features(df: pd.DataFrame, table_type: str = "gca") -> pd.DataFrame:
-    """
-    From the GCA table, we need:
-      SCA, SCA90, GCA, GCA90
-
-    Columns (data-stat):
-      sca
-      sca_per90
-      gca
-      gca_per90
-      plus:
-      player, team
-    """
     df_num = df.copy()
     for col in ["sca", "sca_per90", "gca", "gca_per90"]:
         if col not in df_num.columns:
@@ -593,21 +509,6 @@ def extract_gca_features(df: pd.DataFrame, table_type: str = "gca") -> pd.DataFr
 
 
 def extract_possession_features(df: pd.DataFrame, table_type: str = "possession") -> pd.DataFrame:
-    """
-    From the possession table, we need:
-      touches, miscontrols, dispossessed, failed_take_ons
-
-      failed_take_ons = take_ons - take_ons_won
-
-    Columns (data-stat):
-      touches
-      miscontrols
-      dispossessed
-      take_ons         (attempted)
-      take_ons_won     (successful)
-      plus:
-      player, team
-    """
     df_num = df.copy()
     for col in ["touches", "miscontrols", "dispossessed", "take_ons", "take_ons_won"]:
         if col not in df_num.columns:
@@ -635,20 +536,7 @@ ADVANCED_EXTRACTORS = {
 
 def build_player_advanced_stats() -> pd.DataFrame:
     """
-    Build the merged player advanced stats table from:
-      - passing   -> misplaced_passes
-      - shooting  -> shots
-      - sca       -> sca, sca90, gca, gca90
-      - possession-> touches, miscontrols, dispossessed, failed_take_ons
-
-    Steps:
-      - For each table in ADVANCED_PLAYER_TABLES:
-          * load HTML
-          * extract player table from div_stats_<table>
-          * parse using parse_player_standard_stats
-          * compute the specific features we care about
-      - Outer-join all feature DataFrames on (player, squad)
-      - Write to data/transform/player_advanced_stats/...
+    Build the merged player advanced stats table and upload directly to GCS.
     """
     feature_dfs: List[pd.DataFrame] = []
 
@@ -678,12 +566,13 @@ def build_player_advanced_stats() -> pd.DataFrame:
         feature_dfs,
     )
 
-    PLAYER_ADVANCED_DIR.mkdir(parents=True, exist_ok=True)
-    advanced_df.to_csv(PLAYER_ADVANCED_OUTPUT, index=False)
+    adv_blob = f"{GCS_TRANSFORM_PREFIX}/fbref_championship_player_advanced_stats_2024_25.csv"
+    upload_df_to_gcs(advanced_df, adv_blob)
 
     logger.info(
-        "FBRef advanced player stats written to %s with shape=%s and columns=%s",
-        PLAYER_ADVANCED_OUTPUT,
+        "FBRef advanced player stats uploaded to gs://%s/%s with shape=%s and columns=%s",
+        GCS_BUCKET,
+        adv_blob,
         advanced_df.shape,
         list(advanced_df.columns),
     )
@@ -693,19 +582,17 @@ def build_player_advanced_stats() -> pd.DataFrame:
 
 # ---------- Main entrypoint ----------
 
-
 def run() -> pd.DataFrame:
     """
     Main entrypoint:
       - read local FBRef HTML snapshot
       - parse BOTH squad and player standard stats tables
       - clean & normalise each
-      - write TWO CSVs:
+      - upload TWO CSVs to GCS:
           * fbref_championship_player_standard_stats_2024_25.csv
           * fbref_championship_squad_standard_stats_2024_25.csv
-      - also build advanced player stats from passing/shooting/sca/possession:
-          * data/transform/player_advanced_stats/
-              fbref_championship_player_advanced_stats_2024_25.csv
+      - also build advanced player stats and upload to:
+          * fbref_championship_player_advanced_stats_2024_25.csv
     """
     html = load_fbref_html_from_file()
 
@@ -719,21 +606,32 @@ def run() -> pd.DataFrame:
     raw_squad_df = parse_squad_standard_stats(squad_table)
     squad_df = tidy_squad_df(raw_squad_df)
 
-    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Optional: keep local CSVs by uncommenting:
+    # RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # player_out = RAW_DATA_DIR / "fbref_championship_player_standard_stats_2024_25.csv"
+    # squad_out = RAW_DATA_DIR / "fbref_championship_squad_standard_stats_2024_25.csv"
+    # player_df.to_csv(player_out, index=False)
+    # squad_df.to_csv(squad_out, index=False)
 
-    player_out = RAW_DATA_DIR / "fbref_championship_player_standard_stats_2024_25.csv"
-    squad_out = RAW_DATA_DIR / "fbref_championship_squad_standard_stats_2024_25.csv"
+    # Cloud-first: upload directly to GCS
+    player_blob = f"{GCS_RAW_PREFIX}/fbref_championship_player_standard_stats_2024_25.csv"
+    squad_blob = f"{GCS_RAW_PREFIX}/fbref_championship_squad_standard_stats_2024_25.csv"
 
-    player_df.to_csv(player_out, index=False)
-    squad_df.to_csv(squad_out, index=False)
+    upload_df_to_gcs(player_df, player_blob)
+    upload_df_to_gcs(squad_df, squad_blob)
 
     logger.info(
-        "FBRef standard stats extract complete. Players=%d, Squads=%d",
+        "FBRef standard stats extract complete. "
+        "Players=%d (gs://%s/%s), Squads=%d (gs://%s/%s)",
         len(player_df),
+        GCS_BUCKET,
+        player_blob,
         len(squad_df),
+        GCS_BUCKET,
+        squad_blob,
     )
 
-    # Build and write advanced player stats table
+    # Build and upload advanced player stats table
     try:
         adv_df = build_player_advanced_stats()
         logger.info(

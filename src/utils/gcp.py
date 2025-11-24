@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pandas as pd  # NEW
+
 from google.cloud import storage, bigquery
 from google.api_core.exceptions import Conflict, NotFound
 
@@ -83,7 +85,7 @@ def ensure_dataset_exists(dataset_id: str, location: str = "europe-west2") -> bi
 
 
 # -------------------------------------------------------
-# Upload to GCS
+# Upload helpers
 # -------------------------------------------------------
 
 def upload_file_to_gcs(local_path: Path, gcs_blob_name: str) -> None:
@@ -95,6 +97,18 @@ def upload_file_to_gcs(local_path: Path, gcs_blob_name: str) -> None:
 
     logger.info(f"Uploading {local_path} → gs://{GCS_BUCKET}/{gcs_blob_name}")
     blob.upload_from_filename(str(local_path))
+
+
+def upload_df_to_gcs(df: pd.DataFrame, gcs_blob_name: str) -> None:
+    """
+    Upload a pandas DataFrame as CSV directly to GCS, without writing to disk.
+    """
+    bucket = ensure_bucket_exists(GCS_BUCKET)
+    blob = bucket.blob(gcs_blob_name)
+
+    logger.info("Uploading DataFrame → gs://%s/%s", GCS_BUCKET, gcs_blob_name)
+    csv_data = df.to_csv(index=False)
+    blob.upload_from_string(csv_data, content_type="text/csv")
 
 
 # -------------------------------------------------------
