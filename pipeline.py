@@ -1,4 +1,6 @@
 import argparse
+import subprocess
+from pathlib import Path
 
 from src.extract.fbref_championship import run as run_fbref
 from src.extract.transfermarkt_championship import run as run_transfermarkt
@@ -23,10 +25,28 @@ def load():
     run_load()
 
 
+def reports():
+    """
+    Run the notebook reporting script located at src/notebooks/run_notebooks.py.
+    """
+    script_path = Path("src") / "notebooks" / "run_notebooks.py"
+
+    if not script_path.exists():
+        print("No reporting script found at src/notebooks/run_notebooks.py.")
+        return
+
+    print("Running notebook reporting script...")
+    try:
+        subprocess.run(["python", str(script_path)], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Notebook report generation failed: {e}")
+
+
 def run_all():
     extract()
     transform()
     load()
+    reports()
     print("Pipeline complete!")
 
 
@@ -34,10 +54,10 @@ def main():
     parser = argparse.ArgumentParser(description="Championship ETL pipeline runner")
     parser.add_argument(
         "stage",
-        choices=["extract", "transform", "load", "all"],
+        choices=["extract", "transform", "load", "reports", "all"],
         help="Which part of the pipeline to run",
     )
-    
+
     args = parser.parse_args()
 
     if args.stage == "extract":
@@ -46,6 +66,8 @@ def main():
         transform()
     elif args.stage == "load":
         load()
+    elif args.stage == "reports":
+        reports()
     elif args.stage == "all":
         run_all()
 

@@ -8,8 +8,8 @@
 **Mini Championship Pipeline** is a modular ETL pipeline designed to extract, transform, and load club and player data for the 2024–25 Championship season.  
 It uses:
 
-- Locally saved HTML snapshots from **FBref** and **Transfermarkt**
-- Clean, reproducible parsing and feature engineering
+- Locally saved HTML snapshots from **FBref**
+- **Transfermarkt** URLs
 - **Google Cloud Storage (GCS)** for object storage
 - **Google BigQuery (GBQ)** for warehousing / analytics
 
@@ -25,7 +25,7 @@ Modules:
 
 ### **src/extract/** - scraping Transfermarkt and FBRef data 
 
-Transfermarkt tables have been extracted using requests, since the website's robots.txt allows scraping. However, in the case of FBRef, scraping is blocked - rather than using headless browsers or employing legally ambiguous tactics, I have decided to simply download the HTML locally and extract it from there. Since the data we scrape is not going to be updated in the future, this approach works best.
+Transfermarkt tables have been extracted using requests, since the website's robots.txt allows scraping. However, in the case of FBRef, scraping is blocked (returns 403 regarless of wait time) - rather than using headless browsers or employing legally ambiguous tactics, I have decided to simply download the HTML locally and extract it from there. Since the data we scrape is not going to be updated in the future, this approach works best.
 
 In addition to the two websites suggested in the interview task, I have scraped an additional 4 pages from FBRef for some advanced player stats to be able to have a view on a new metric - player "usage". This will be detailed in the "Advanced Stats" section below.
 
@@ -55,6 +55,8 @@ python pipeline.py transform
 python pipeline.py load
 ```
 
+
+
 ---
 
 ## Project Structure
@@ -64,14 +66,17 @@ mini-championship-pipeline/
 ├── data/
 │   ├── curated/
 │   ├── raw/
+│       └── html/
 │   ├── transform/
 │   └── utils/
 ├── notebooks/
 ├── reports/
 ├── src/
 │   ├── extract/
+│   ├── load/
 │   ├── transform/
-│   └── load/
+│   └── utils/
+│       └── helpers/
 ├── .env.example
 ├── pipeline.py
 ├── config.py
@@ -106,6 +111,7 @@ Ensure that Python is added to your PATH during installation (Windows will show 
 git clone https://github.com/FelixM10/mini-championship-pipeline.git
 cd mini-championship-pipeline
 ```
+Open folder using VSCode (or your preferred IDE)
 
 ### 2. Create and activate a virtual environment
 ```bash
@@ -124,10 +130,13 @@ pip install -r requirements.txt
 
 ## Configuration
 
-### 4. Create your `.env`
+### 4. Create your `.env` and import credentials
+
 ```bash
 cp .env.example .env
 ```
+
+Add the provided pipeline-sa.json file to root/credentials/
 
 Edit `.env`:
 
@@ -142,38 +151,103 @@ GOOGLE_APPLICATION_CREDENTIALS=credentials/pipeline-sa.json
 
 ## Outputs
 
-- **data/raw/** — Raw HTML + parsed CSVs  
+- **data/raw/** — Raw HTML + parsed CSVs and helpers
 - **data/curated/** — Clean, tidied CSVs  
 - **Google Cloud Storage** — Final curated files  
 - **BigQuery dataset** — Analytics-ready tables  
 
 ---
 
-## Troubleshooting
+## Windows Troubleshooting
 
-### `import dotenv could not be resolved`
-Select the correct interpreter in VS Code:
-```
-CMD + Shift + P → Python: Select Interpreter → choose .venv/bin/python
-```
+This section covers common setup issues on Windows and how to fix them.
+If you run into any of the following errors, follow the steps provided.
 
-### Dataset not found
-Ensure the dataset name in `.env` matches exactly.
+------------------------------------------------------------------------
+
+### 1. `python` not recognized
+
+Error:
+
+    'python' is not recognized as an internal or external command
+
+Cause: Python is installed, but not added to your system PATH.
+
+Fix: Reinstall Python from https://python.org. 2. On the installer's
+first screen, check: Add Python to PATH 3. Complete the installation and
+restart your terminal.
+
+------------------------------------------------------------------------
+
+### 2. `py` works but `python` does not
+
+If:
+
+    py --version   works
+    python --version   fails
+
+Use `py` instead of `python`:
+
+    py script.py
+
+------------------------------------------------------------------------
+
+### 3. Git not recognized
+
+Error:
+
+    'git' is not recognized as an internal or external command
+
+Fix: 1. Download Git for Windows: https://git-scm.com 2. During
+installation, select: Git from the command line and also from 3rd-party
+software 3. Restart terminal. 4. Verify: git --version
+
+------------------------------------------------------------------------
+
+### 4. Cannot activate virtual environment --- "running scripts is disabled"
+
+Error:
+
+    .venv\Scripts\activate : File cannot be loaded because running scripts is disabled on this system.
+
+Fix (recommended): Run PowerShell as Administrator:
+
+    ```Set-ExecutionPolicy RemoteSigned```
+    
+    Press A
+
+Then activate:
+
+    .venv\Scripts\activate
+
+------------------------------------------------------------------------
+
+### 5. VS Code not using the correct Python interpreter
+
+Fix: 1. Open VS Code. 2. Press Ctrl + Shift + P. 3. Select: Python:
+Select Interpreter 4. Choose: `<project>`{=html}/venv/Scripts/python.exe
 
 ---
 
 ## For Interviewers
 
-Steps to run:
+### Steps to run pipeline:
 
+open VSCode (or your preferred IDE) - new terminal
 ```bash
 git clone <repo>
 cd mini-championship-pipeline
+```
+open Folder in VSCode - select repository folder
+```
+bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 python pipeline.py all
 ```
+
+### Steps to run notebooks:
 
 ---

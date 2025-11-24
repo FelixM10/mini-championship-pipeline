@@ -5,9 +5,11 @@ pandas
 pyarrow
 google-cloud-storage
 google-cloud-bigquery
+google-cloud-bigquery-storage
 jupyter
 matplotlib
 pycountry
 adjustText
 db-dtypes
 python-dotenv
+nbconvert
