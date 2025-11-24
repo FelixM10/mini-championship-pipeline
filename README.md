@@ -12,6 +12,7 @@ It uses:
 - **Transfermarkt** URLs
 - **Google Cloud Storage (GCS)** for object storage
 - **Google BigQuery (GBQ)** for warehousing / analytics
+- **Analytics Report** generated from a notebook, focused on Swansea
 
 ---
 
@@ -39,6 +40,10 @@ Five semantic tables were created: an enhanced league table that contains transf
 
 Using a provided service account, the user can upload these tables to a GCS bucket, and load them into a BigQuery dataset, as part of running the pipeline.
 
+### **notebooks/** — Jupyter Notebook generating analytics report 
+
+As part of the pipeline, a simple analytics report is generated, focused on Swansea.
+
 ### **pipeline.py** — orchestrator for running all stages  
 
 To run, make sure all installation instructions below have been followed, the `.venv` has been activated, and `requirements.txt` has been installed. After that, you can:
@@ -53,9 +58,8 @@ Or run individual steps:
 python pipeline.py extract
 python pipeline.py transform
 python pipeline.py load
+python pipeline.py reports
 ```
-
-
 
 ---
 
@@ -151,10 +155,10 @@ GOOGLE_APPLICATION_CREDENTIALS=credentials/pipeline-sa.json
 
 ## Outputs
 
-- **data/raw/** — Raw HTML + parsed CSVs and helpers
-- **data/curated/** — Clean, tidied CSVs  
-- **Google Cloud Storage** — Final curated files  
-- **BigQuery dataset** — Analytics-ready tables  
+- **Google Cloud Storage Bucket/raw** — raw files 
+- **Google Cloud Storage Bucket/curated** — curated files 
+- **BigQuery dataset** — curated files uploaded as GBQ tables
+- **HTML Report** - Focused on Swansea
 
 ---
 
