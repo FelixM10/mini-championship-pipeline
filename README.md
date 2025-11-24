@@ -233,9 +233,8 @@ Select Interpreter 4. Choose: `<project>`{=html}/venv/Scripts/python.exe
 
 ---
 
-## For Interviewers
 
-### Steps to run pipeline:
+## Steps to run pipeline:
 
 open VSCode (or your preferred IDE) - new terminal
 ```bash
@@ -252,6 +251,12 @@ cp .env.example .env
 python pipeline.py all
 ```
 
-### Steps to run notebooks:
-
 ---
+
+## Potential future improvements
+
+- Add p90 possession adjusted stats to both player and squad tables
+- Add percentiles to create player profiles
+- Add parquet file processing for larger datasets
+- Expand player stats to collect more detailed information
+- Add per-match stats to check performance v different opponents
