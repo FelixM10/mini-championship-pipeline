@@ -21,4 +21,7 @@ credentials/
 reports/
 
 # CSV files
-raw/*.csv
+data/raw/*.csv
+data/curated/
+data/transform/
+data/utils/
